@@ -1,17 +1,19 @@
 #!/usr/bin/env sh
 
-depr=`mktemp`
+ex_file=`mktemp`
 graft="0"
 master="0"
 obsolete="0"
+exclude="HEAD"
 gc="0"
 
 help() {
 	echo 'Usage:'
-	echo '  git-prune -g=starting_commit_hash [ -o=reference_commit_hash ] [ -m=new_master_branch ] [ -c ]'
+	echo '  git-prune -g=starting_commit_hash [ -o=reference_commit_hash ] [ -m=new_master_branch ] [ -e=exclude_branches ] [ -c ]'
 	echo '    -g - commit hash to remove history before'
 	echo '    -o - commit hash to check branches against'
 	echo '    -m - name of the branch to create new master from'
+	echo '    -e - comma-separated list of branches to be excluded from repository'
 	echo '    -c - perform aggressive garbage collection'
 	echo
 }
@@ -36,6 +38,10 @@ parse_args() {
 				;;
 			-m=*)
 				master="${arg#*=}"
+				shift
+				;;
+			-e=*)
+				exclude="${arg#*=}"
 				shift
 				;;
 			-c)
@@ -71,14 +77,14 @@ recreate_master() {
 sync_branches() {
 	for remote in `git branch --remote | grep -v "/HEAD"`; do
 		remote=`echo ${remote} | sed 's/ *//g'`;
-		is_depr=`grep -x "${remote}" $depr`
-		if [ -n "${is_depr}" ]; then
-			echo "${remote} is deprecated. Skipping..."
+		local=`echo "${remote}" | cut -d "/" -f 2`
+		is_ex=`grep -x "${remote}" $ex_file`
+		if [ -n "${is_ex}" ]; then
+			echo "${remote} is skipped..."
 		else
-			local=`echo "${remote}" | cut -d "/" -f 2`
 			echo "${remote} -> ${local}"
 			git checkout --quiet $local
-			git reset --hard --quiet
+			git reset --hard --quiet $remote
 		fi
 	done
 	git checkout master
@@ -86,31 +92,37 @@ sync_branches() {
 }
 
 collect_obsolete_branches() {
+	backup_ifs=$IFS
+	IFS=','
+	exes=$3
+	for branch in $exes; do
+		echo "origin/${branch}" >> $ex_file
+	done
+	IFS=$backup_ifs
+
 	if [ "$2" != "0" ]; then
-		git branch --remote --contains $obsolete | grep -v "/HEAD" | sed 's/ *//g' > $depr
+		git branch --remote --contains $obsolete | grep -v "/HEAD" | sed 's/ *//g' >> $ex_file
 	else 
 		all=`mktemp`
 		act=`mktemp`
 		git branch --remote | sort | sed 's/ *//g' > $all
 		git branch --remote --contains $1 | sort | sed 's/ *//g' > $act
-		comm -3 $all $act > $depr
+		comm -3 $all $act >> $ex_file
 		rm $all $act
 	fi
-	cat $depr
+	cat $ex_file
 }
 
 filter_history() {
-	git filter-branch -f -- --all
+	git filter-branch --force --tag-name-filter cat -- --all
 	rm .git/info/grafts
 	# remove filter-branch backup 
-	for branch in `git branch --all | grep -v "/HEAD" | sed 's/ *//g;s/\*//g'`; do
-		git update-ref -d refs/original/refs/heads/$branch
-	done
+	git for-each-ref --format="%(refname)" refs/original/ | xargs -n 1 git update-ref -d
 	git reflog expire --expire=now --all
 }
 
 parse_args $@
-validate_args $graft $obsolete $master $gc
+validate_args $graft $obsolete $master $exclude $gc
 
 header 'Actualizing repo...'
 actualize_repo
@@ -124,7 +136,7 @@ header 'Creating graft...'
 echo $graft > .git/info/grafts
 
 header 'Collecting obsolete branches...'
-collect_obsolete_branches $graft $obsolete
+collect_obsolete_branches $graft $obsolete $exclude
 
 header 'Syncing remote branches...'
 sync_branches
@@ -141,6 +153,6 @@ then
 	git gc --prune=now --aggressive
 fi
 
-rm $depr
+rm $ex_file
 
 header 'Done'
