@@ -1,0 +1,146 @@
+#!/usr/bin/env sh
+
+depr=`mktemp`
+graft="0"
+master="0"
+obsolete="0"
+gc="0"
+
+help() {
+	echo 'Usage:'
+	echo '  git-prune -g=starting_commit_hash [ -o=reference_commit_hash ] [ -m=new_master_branch ] [ -c ]'
+	echo '    -g - commit hash to remove history before'
+	echo '    -o - commit hash to check branches against'
+	echo '    -m - name of the branch to create new master from'
+	echo '    -c - perform aggressive garbage collection'
+	echo
+}
+
+header() {
+	echo
+	echo '========================================'
+	echo $1
+	echo '========================================'
+}
+
+parse_args() {
+	for arg in $@; do
+		case $arg in
+			-g=*)
+				graft="${arg#*=}"
+				shift
+				;;
+			-o=*)
+				obsolete="${arg#*=}"
+				shift
+				;;
+			-m=*)
+				master="${arg#*=}"
+				shift
+				;;
+			-c)
+				gc="1"
+				shift
+				;;
+			*)
+				shift
+				;;
+		esac
+	done
+}
+
+validate_args() {
+	if [ "$1" = "0" ]; then
+		help
+		echo 'No graft provided'
+		exit
+	fi
+}
+
+actualize_repo() {
+	git fetch --prune --all
+	git reset --hard --quiet
+}
+
+recreate_master() {
+	git checkout $1
+	git branch -D master
+	git checkout -b master
+}
+
+sync_branches() {
+	for remote in `git branch --remote | grep -v "/HEAD"`; do
+		remote=`echo ${remote} | sed 's/ *//g'`;
+		is_depr=`grep -x "${remote}" $depr`
+		if [ -n "${is_depr}" ]; then
+			echo "${remote} is deprecated. Skipping..."
+		else
+			local=`echo "${remote}" | cut -d "/" -f 2`
+			echo "${remote} -> ${local}"
+			git checkout --quiet $local
+			git reset --hard --quiet
+		fi
+	done
+	git checkout master
+	git reset --hard
+}
+
+collect_obsolete_branches() {
+	if [ "$2" != "0" ]; then
+		git branch --remote --contains $obsolete | grep -v "/HEAD" | sed 's/ *//g' > $depr
+	else 
+		all=`mktemp`
+		act=`mktemp`
+		git branch --remote | sort | sed 's/ *//g' > $all
+		git branch --remote --contains $1 | sort | sed 's/ *//g' > $act
+		comm -3 $all $act > $depr
+		rm $all $act
+	fi
+	cat $depr
+}
+
+filter_history() {
+	git filter-branch -f -- --all
+	rm .git/info/grafts
+	# remove filter-branch backup 
+	for branch in `git branch --all | grep -v "/HEAD" | sed 's/ *//g;s/\*//g'`; do
+		git update-ref -d refs/original/refs/heads/$branch
+	done
+	git reflog expire --expire=now --all
+}
+
+parse_args $@
+validate_args $graft $obsolete $master $gc
+
+header 'Actualizing repo...'
+actualize_repo
+
+if [ "$master" != "0" ]; then
+	header 'Recreating master...'
+	recreate_master $master
+fi
+
+header 'Creating graft...'
+echo $graft > .git/info/grafts
+
+header 'Collecting obsolete branches...'
+collect_obsolete_branches $graft $obsolete
+
+header 'Syncing remote branches...'
+sync_branches
+
+header 'Removing origin...'
+git remote rm origin
+
+header 'Filtering history...'
+filter_history
+
+if [ "$gc" != "0" ]
+then
+	header 'Collecting garbage...'
+	git gc --prune=now --aggressive
+fi
+
+rm $depr
+
+header 'Done'
