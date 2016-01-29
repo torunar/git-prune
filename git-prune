@@ -1,19 +1,21 @@
 #!/usr/bin/env sh
 
-ex_file=`mktemp`
-graft="0"
-master="0"
-obsolete="0"
-exclude="HEAD"
+exclude_file=`mktemp`
+graft_hash="0"
+master="@"
+obsolete_hash="0"
+exclude_branches="HEAD"
+repo="0"
 gc="0"
 
 help() {
 	echo 'Usage:'
-	echo '  git-prune -g=starting_commit_hash [ -o=reference_commit_hash ] [ -m=new_master_branch ] [ -e=exclude_branches ] [ -c ]'
+	echo '  git-prune -g=starting_commit_hash [ -o=reference_commit_hash ] [ -m=new_master_branch ] [ -e=exclude_branches ] [ -r=new_repository ] [ -c ]'
 	echo '    -g - commit hash to remove history before'
 	echo '    -o - commit hash to check branches against'
 	echo '    -m - name of the branch to create new master from'
 	echo '    -e - comma-separated list of branches to be excluded from repository'
+	echo '    -r - address of new repository to push into'
 	echo '    -c - perform aggressive garbage collection'
 	echo
 }
@@ -29,11 +31,11 @@ parse_args() {
 	for arg in $@; do
 		case $arg in
 			-g=*)
-				graft="${arg#*=}"
+				graft_hash="${arg#*=}"
 				shift
 				;;
 			-o=*)
-				obsolete="${arg#*=}"
+				obsolete_hash="${arg#*=}"
 				shift
 				;;
 			-m=*)
@@ -41,7 +43,11 @@ parse_args() {
 				shift
 				;;
 			-e=*)
-				exclude="${arg#*=}"
+				exclude_branches="${arg#*=}"
+				shift
+				;;
+			-r=*)
+				repo="${arg#*=}"
 				shift
 				;;
 			-c)
@@ -78,7 +84,7 @@ sync_branches() {
 	for remote in `git branch --remote | grep -v "/HEAD"`; do
 		remote=`echo ${remote} | sed 's/ *//g'`;
 		local=`echo "${remote}" | cut -d "/" -f 2`
-		is_ex=`grep -x "${remote}" $ex_file`
+		is_ex=`grep -x "${remote}" $exclude_file`
 		if [ -n "${is_ex}" ]; then
 			echo "${remote} is skipped..."
 		else
@@ -96,47 +102,59 @@ collect_obsolete_branches() {
 	IFS=','
 	exes=$3
 	for branch in $exes; do
-		echo "origin/${branch}" >> $ex_file
+		echo "origin/${branch}" >> $exclude_file
 	done
 	IFS=$backup_ifs
 
 	if [ "$2" != "0" ]; then
-		git branch --remote --contains $obsolete | grep -v "/HEAD" | sed 's/ *//g' >> $ex_file
-	else 
+		git branch --remote --contains $obsolete_hash | grep -v "/HEAD" | sed 's/ *//g' >> $exclude_file
+	else
 		all=`mktemp`
 		act=`mktemp`
 		git branch --remote | sort | sed 's/ *//g' > $all
 		git branch --remote --contains $1 | sort | sed 's/ *//g' > $act
-		comm -3 $all $act >> $ex_file
+		comm -3 $all $act >> $exclude_file
 		rm $all $act
 	fi
-	cat $ex_file
+	cat $exclude_file
 }
 
 filter_history() {
-	git filter-branch --force --tag-name-filter cat -- --all
+	git filter-branch --force --prune-empty --tag-name-filter cat -- --all
 	rm .git/info/grafts
-	# remove filter-branch backup 
+	# remove filter-branch backup
 	git for-each-ref --format="%(refname)" refs/original/ | xargs -n 1 git update-ref -d
 	git reflog expire --expire=now --all
 }
 
+push_repo() {
+	git remote add origin $1
+	git push -u origin --all
+}
+
 parse_args $@
-validate_args $graft $obsolete $master $exclude $gc
+validate_args $graft_hash $obsolete_hash $master $exclude_branches $repo $gc
 
 header 'Actualizing repo...'
 actualize_repo
 
-if [ "$master" != "0" ]; then
+if [ "$master" != "@" ]; then
 	header 'Recreating master...'
 	recreate_master $master
 fi
 
 header 'Creating graft...'
-echo $graft > .git/info/grafts
+echo $graft_hash > .git/info/grafts
 
 header 'Collecting obsolete branches...'
-collect_obsolete_branches $graft $obsolete $exclude
+echo 'Following branches will be excluded from the repository:'
+collect_obsolete_branches $graft_hash $obsolete_hash $exclude_branches
+
+echo "Continue? [y/N] \c"
+read continue
+if [ "$continue" != "y" ]; then
+	exit
+fi
 
 header 'Syncing remote branches...'
 sync_branches
@@ -147,12 +165,16 @@ git remote rm origin
 header 'Filtering history...'
 filter_history
 
-if [ "$gc" != "0" ]
-then
+if [ "$gc" != "0" ]; then
 	header 'Collecting garbage...'
 	git gc --prune=now --aggressive
 fi
 
-rm $ex_file
+if [ "$repo" != "0" ]; then
+	header 'Pushing to new repo...'
+	push_repo $repo
+fi
+
+rm $exclude_file
 
 header 'Done'
