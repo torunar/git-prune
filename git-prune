@@ -120,7 +120,7 @@ collect_obsolete_branches() {
 }
 
 filter_history() {
-	git filter-branch --force --prune-empty --tag-name-filter cat -- --all
+	git filter-branch --force --index-filter "git rm -rf --cached --ignore-unmatch _docs _tools" --prune-empty --tag-name-filter cat -- --all
 	rm .git/info/grafts
 	# remove filter-branch backup
 	git for-each-ref --format="%(refname)" refs/original/ | xargs -n 1 git update-ref -d
